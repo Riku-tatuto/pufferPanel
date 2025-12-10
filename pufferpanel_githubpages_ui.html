@@ -1,0 +1,409 @@
+<!--
+PufferPanel Control UI (single-file static site)
+Place this file as `index.html` in a GitHub repo and enable GitHub Pages (branch: main / docs/ or gh-pages) to host.
+
+Features:
+- Input and (optionally) save API key (masked), server base URL and default container name
+- Test connection to your API (/health) and show "daemon" check at http://[ip]:8080/daemon
+- List published ports, add/remove ports (calls API endpoints created earlier)
+- Restart container
+- Minimal obfuscation of stored API key (base64) with a clear security warning
+
+Security notes (read):
+- This UI calls your backend from the browser. Your backend must enable CORS for this origin or set ALLOW_CORS=true
+- Do NOT store real production keys on shared devices. Stored keys are only lightly obfuscated (base64) for convenience.
+- For internet exposure, put this UI behind HTTPS and a reverse proxy. Use strong API_KEY and IP restrictions.
+
+Deploy to GitHub Pages (quick):
+1. Create a new repository on GitHub.
+2. Upload this index.html to the repository root or to docs/ with branch main.
+3. In repo Settings > Pages, select the branch (main) and folder (root or /docs) then Save. Wait a minute.
+4. Visit the published URL and enter your server address and API key in the UI.
+
+-->
+
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PufferPanel Control • Dashboard</title>
+  <meta name="description" content="GUI for controlling pufferpanel Docker container (ports, restart, status)" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Tailwind custom config
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f6fbff',
+              100: '#ecf7ff',
+              200: '#cfe9ff',
+              500: '#2b7cff'
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* small helpers */
+    .glass { backdrop-filter: blur(6px) saturate(120%); background: rgba(255,255,255,0.6); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', 'Noto Sans JP', monospace; }
+  </style>
+</head>
+<body class="bg-gradient-to-br from-slate-900 via-indigo-900 to-rose-900 min-h-screen text-slate-100">
+  <div class="max-w-6xl mx-auto p-6">
+    <header class="flex items-center justify-between gap-4 mb-6">
+      <div class="flex items-center gap-4">
+        <div class="w-14 h-14 rounded-2xl bg-white/10 flex items-center justify-center ring-1 ring-white/10">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 12h6" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M21 12h-6" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="12" cy="12" r="8" stroke="#fff" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="text-2xl font-semibold">PufferPanel Control</h1>
+          <p class="text-sm text-white/70">Ports, restart and quick health checks — lightweight UI for GitHub Pages</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <div id="apiStatus" class="px-3 py-1 rounded-full bg-white/6 border border-white/6 font-medium text-sm flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-yellow-400" id="apiStatusDot"></span>
+          <span id="apiStatusText">Waiting (no server)</span>
+        </div>
+        <div id="daemonStatus" class="px-3 py-1 rounded-full bg-white/6 border border-white/6 font-medium text-sm flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-gray-400" id="daemonStatusDot"></span>
+          <span id="daemonStatusText">Daemon: waiting</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- LEFT: Settings -->
+      <section class="glass rounded-2xl p-4 md:col-span-1">
+        <h2 class="text-lg font-semibold mb-2">Connection</h2>
+        <p class="text-sm text-white/70 mb-4">Enter your API server and API key. Keys are masked. You can optionally save them locally.</p>
+
+        <label class="block text-sm text-white/80 mb-1">Server URL</label>
+        <input id="serverInput" class="w-full rounded-md p-2 mb-3 bg-white/5 placeholder:text-white/50" placeholder="http://192.168.1.5:3000" />
+
+        <label class="block text-sm text-white/80 mb-1">API Key</label>
+        <div class="flex gap-2 mb-3">
+          <input id="apiKeyInput" type="password" class="flex-1 rounded-md p-2 bg-white/5" placeholder="hidden" />
+          <button id="toggleReveal" class="px-3 py-2 rounded-md bg-white/6">Show</button>
+        </div>
+
+        <label class="inline-flex items-center gap-2 text-sm mb-3">
+          <input id="saveKey" type="checkbox" class="rounded" checked />
+          <span class="text-white/80">Save API key locally (lightly obfuscated)</span>
+        </label>
+
+        <label class="block text-sm text-white/80 mb-1">Default container</label>
+        <input id="containerInput" class="w-full rounded-md p-2 mb-3 bg-white/5" placeholder="pufferpanel" />
+
+        <div class="flex gap-2">
+          <button id="btnTest" class="flex-1 px-3 py-2 rounded-md bg-brand-500 hover:brightness-105">Test & Connect</button>
+          <button id="btnClear" class="px-3 py-2 rounded-md bg-white/6">Clear</button>
+        </div>
+
+        <p class="text-xs text-yellow-200 mt-3">Note: enable CORS on your API (ALLOW_CORS=true) or configure your reverse proxy. Do not store keys on public/shared devices.</p>
+      </section>
+
+      <!-- CENTER: Controls -->
+      <section class="glass rounded-2xl p-4 md:col-span-2">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold">Controls</h2>
+          <div class="text-sm text-white/70">Connected: <span id="connectedText">No</span></div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+          <div class="p-3 bg-white/5 rounded-lg">
+            <div class="text-sm mb-2 font-medium">Restart Server</div>
+            <div class="text-xs text-white/70 mb-3">Restart the configured container</div>
+            <div class="flex gap-2">
+              <button id="btnRestart" class="flex-1 py-2 rounded-md bg-rose-500">Restart</button>
+            </div>
+          </div>
+
+          <div class="p-3 bg-white/5 rounded-lg">
+            <div class="text-sm mb-2 font-medium">Ports: Refresh</div>
+            <div class="text-xs text-white/70 mb-3">Fetch published ports from container</div>
+            <div class="flex gap-2">
+              <button id="btnRefreshPorts" class="flex-1 py-2 rounded-md bg-indigo-600">Refresh</button>
+            </div>
+          </div>
+
+          <div class="p-3 bg-white/5 rounded-lg">
+            <div class="text-sm mb-2 font-medium">Daemon Check</div>
+            <div class="text-xs text-white/70 mb-3">Hit http://[IP]:8080/daemon</div>
+            <div class="flex gap-2">
+              <button id="btnDaemonCheck" class="flex-1 py-2 rounded-md bg-emerald-500">Check</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-6">
+          <h3 class="text-md font-semibold mb-2">Published Ports</h3>
+          <div id="portsList" class="space-y-2 text-sm text-white/80">
+            <!-- populated dynamically -->
+            <div class="text-xs text-white/60">No data</div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+          <div>
+            <label class="text-sm mb-1 block">Add mapping (host:container)</label>
+            <input id="mapInput" placeholder="8080:80" class="w-full p-2 rounded bg-white/5" />
+          </div>
+          <div>
+            <label class="text-sm mb-1 block">Protocol</label>
+            <select id="protoSelect" class="w-full p-2 rounded bg-white/5">
+              <option value="tcp">tcp</option>
+              <option value="udp">udp</option>
+            </select>
+          </div>
+          <div>
+            <button id="btnAddPort" class="w-full py-2 rounded-md bg-indigo-500">Add Port</button>
+            <button id="btnRemovePort" class="w-full mt-2 py-2 rounded-md bg-white/6">Remove Port</button>
+          </div>
+        </div>
+
+        <div id="logArea" class="mt-6 p-3 bg-white/4 rounded-lg mono text-xs max-h-48 overflow-auto"></div>
+      </section>
+    </main>
+
+    <footer class="mt-8 text-center text-white/60 text-sm">
+      Built for private use. Keep your API key secret. UI by you — deploy on GitHub Pages.
+    </footer>
+  </div>
+
+<script>
+// ---------- small client-side helper UI script ----------
+const $ = id => document.getElementById(id);
+const baseKey = 'puffer_ui_saved';
+
+function log(...args) {
+  const out = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  const el = $('logArea');
+  const p = document.createElement('div');
+  p.textContent = out;
+  el.prepend(p);
+}
+
+function setStatus(apiOk, text) {
+  const dot = $('apiStatusDot');
+  const t = $('apiStatusText');
+  if (apiOk) { dot.style.background = '#34D399'; } else { dot.style.background = '#F59E0B'; }
+  t.textContent = text;
+}
+
+function setDaemonStatus(ok, text) {
+  const dot = $('daemonStatusDot');
+  const t = $('daemonStatusText');
+  dot.style.background = ok ? '#34D399' : '#F87171';
+  t.textContent = text;
+}
+
+function storeSaved(server, key, container, save) {
+  if (!save) { localStorage.removeItem(baseKey); return; }
+  try {
+    // lite obfuscation
+    const payload = { server, key: btoa(key), container };
+    localStorage.setItem(baseKey, JSON.stringify(payload));
+  } catch(e) {
+    console.warn('store failed', e);
+  }
+}
+
+function loadSaved() {
+  try {
+    const raw = localStorage.getItem(baseKey);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    return { server: p.server, key: atob(p.key), container: p.container };
+  } catch(e) { return null; }
+}
+
+function clearSavedInputs() {
+  $('serverInput').value = '';
+  $('apiKeyInput').value = '';
+  $('containerInput').value = '';
+  $('saveKey').checked = true;
+  localStorage.removeItem(baseKey);
+  updateConnectionState();
+}
+
+function getConfigFromUI() {
+  const server = $('serverInput').value.trim();
+  const apiKey = $('apiKeyInput').value;
+  const container = $('containerInput').value.trim() || 'pufferpanel';
+  return { server, apiKey, container };
+}
+
+function headersFromKey(key) {
+  // prefer x-api-key but backend accepts both
+  return { 'x-api-key': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' };
+}
+
+async function testApi() {
+  const { server, apiKey } = getConfigFromUI();
+  if (!server || !apiKey) { setStatus(false, 'Waiting (enter server & key)'); return false; }
+  try {
+    const res = await fetch(`${server.replace(/\/+$/, '')}/health`, { headers: headersFromKey(apiKey) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    setStatus(true, 'API: OK');
+    log('Health ->', body);
+    $('connectedText').textContent = 'Yes';
+    return true;
+  } catch (e) {
+    setStatus(false, 'API: Error');
+    log('Health error', e.message || e);
+    $('connectedText').textContent = 'No';
+    return false;
+  }
+}
+
+async function checkDaemon() {
+  const server = $('serverInput').value.trim();
+  if (!server) { setDaemonStatus(false, 'Daemon: waiting (no IP)'); return; }
+  // extract host part (scheme + host) or IP from server
+  try {
+    const url = new URL(server);
+    const host = url.hostname;
+    const checkUrl = `${url.protocol}//${host}:8080/daemon`;
+    const res = await fetch(checkUrl, { mode: 'cors' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const text = await res.text();
+    setDaemonStatus(true, 'Daemon: responded');
+    log('Daemon OK', checkUrl, text.slice(0,200));
+  } catch (e) {
+    setDaemonStatus(false, 'Daemon: error');
+    log('Daemon check error', e.message || e);
+  }
+}
+
+async function restartContainer() {
+  const { server, apiKey, container } = getConfigFromUI();
+  if (!server || !apiKey) return alert('Enter server and API key');
+  try {
+    const res = await fetch(`${server.replace(/\/+$/, '')}/restart`, {
+      method: 'POST', headers: headersFromKey(apiKey), body: JSON.stringify({ name: container })
+    });
+    const j = await res.json();
+    if (!res.ok) { log('Restart failed', j); alert('Restart failed'); return; }
+    log('Restart', j);
+    alert('Restart requested');
+  } catch (e) { log('Restart error', e); alert('Error: ' + e.message); }
+}
+
+async function refreshPorts() {
+  const { server, apiKey, container } = getConfigFromUI();
+  if (!server || !apiKey) return alert('Enter server and API key');
+  try {
+    const res = await fetch(`${server.replace(/\/+$/, '')}/ports?name=${encodeURIComponent(container)}`, { headers: headersFromKey(apiKey) });
+    const j = await res.json();
+    if (!res.ok) { log('Ports fetch failed', j); alert('Failed to get ports'); return; }
+    renderPorts(j.ports || []);
+    log('Ports', j.ports || []);
+  } catch (e) { log('Ports error', e); alert('Error: ' + e.message); }
+}
+
+function renderPorts(list) {
+  const div = $('portsList');
+  div.innerHTML = '';
+  if (!list || !list.length) return div.innerHTML = '<div class="text-xs text-white/60">No published ports</div>';
+  for (const p of list) {
+    const el = document.createElement('div');
+    el.className = 'flex items-center justify-between bg-white/2 p-2 rounded';
+    el.innerHTML = `<div class="text-sm">${p.hostIp}:${p.hostPort} → <span class="text-white/90">:${p.containerPort}/${p.protocol}</span></div>`;
+    div.appendChild(el);
+  }
+}
+
+async function addPort() {
+  const { server, apiKey, container } = getConfigFromUI();
+  const mapping = $('mapInput').value.trim();
+  const proto = $('protoSelect').value || 'tcp';
+  if (!mapping) return alert('Enter mapping like 8080:80');
+  try {
+    const payload = { name: container, mappings: [ `${mapping}${proto==='udp'?'/udp':''}` ] };
+    const res = await fetch(`${server.replace(/\/+$/, '')}/ports/add`, { method: 'POST', headers: headersFromKey(apiKey), body: JSON.stringify(payload) });
+    const j = await res.json();
+    if (!res.ok) { log('Add failed', j); alert('Add port failed'); return; }
+    log('Add result', j);
+    await refreshPorts();
+  } catch (e) { log('Add error', e); alert('Error: '+e.message); }
+}
+
+async function removePort() {
+  const { server, apiKey, container } = getConfigFromUI();
+  const mapping = $('mapInput').value.trim();
+  const proto = $('protoSelect').value || 'tcp';
+  if (!mapping) return alert('Enter mapping like 8080:80');
+  try {
+    const payload = { name: container, mappings: [ `${mapping}${proto==='udp'?'/udp':''}` ] };
+    const res = await fetch(`${server.replace(/\/+$/, '')}/ports/remove`, { method: 'POST', headers: headersFromKey(apiKey), body: JSON.stringify(payload) });
+    const j = await res.json();
+    if (!res.ok) { log('Remove failed', j); alert('Remove port failed'); return; }
+    log('Remove result', j);
+    await refreshPorts();
+  } catch (e) { log('Remove error', e); alert('Error: '+e.message); }
+}
+
+// UI wiring
+$('toggleReveal').addEventListener('click', () => {
+  const el = $('apiKeyInput');
+  if (el.type === 'password') { el.type = 'text'; $('toggleReveal').textContent = 'Hide'; } else { el.type = 'password'; $('toggleReveal').textContent = 'Show'; }
+});
+
+$('btnTest').addEventListener('click', async () => {
+  const { server, apiKey, container } = getConfigFromUI();
+  if (!server || !apiKey) return alert('Enter server and API key');
+  const ok = await testApi();
+  if (ok) {
+    storeSaved(server, apiKey, container, $('saveKey').checked);
+    await refreshPorts();
+    await checkDaemon();
+  }
+});
+$('btnClear').addEventListener('click', () => clearSavedInputs());
+$('btnRestart').addEventListener('click', () => { if (confirm('Restart container?')) restartContainer(); });
+$('btnRefreshPorts').addEventListener('click', refreshPorts);
+$('btnDaemonCheck').addEventListener('click', checkDaemon);
+$('btnAddPort').addEventListener('click', addPort);
+$('btnRemovePort').addEventListener('click', removePort);
+
+// load saved
+window.addEventListener('load', () => {
+  const saved = loadSaved();
+  if (saved) {
+    $('serverInput').value = saved.server || '';
+    $('apiKeyInput').value = saved.key || '';
+    $('containerInput').value = saved.container || 'pufferpanel';
+  }
+  // initial status
+  if ($('serverInput').value) {
+    setStatus(false, 'Not tested');
+  } else {
+    setStatus(false, 'Waiting (no server)');
+    setDaemonStatus(false, 'Daemon: waiting');
+  }
+});
+
+function updateConnectionState() {
+  const has = !!($('serverInput').value && $('apiKeyInput').value);
+  $('connectedText').textContent = has ? 'Yes (local)' : 'No';
+}
+
+['serverInput','apiKeyInput','containerInput'].forEach(id => {
+  $(id).addEventListener('input', updateConnectionState);
+});
+
+</script>
+</body>
+</html>
